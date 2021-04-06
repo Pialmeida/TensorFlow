@@ -9,7 +9,6 @@ import zipfile
 from collections import defaultdict
 from io import StringIO
 from matplotlib import pyplot as plt
-from PIL import Image
 
 from mylib.centroidtracker import CentroidTracker
 from mylib.trackableobject import TrackableObject
@@ -25,6 +24,9 @@ sys.path.append("..")
 from utils import label_map_util
 from utils import visualization_utils as vis_util
 
+# import paho.mqtt.client as mqtt
+
+import RPi.GPIO as GPIO
 
 
 #Main class for Monitor Camera
@@ -55,11 +57,25 @@ class Monitor():
 		#Get Initial time
 		self.now = datetime.datetime.now()
 
+		#Debugging
 		self._counter = 1
 
+		self.P1 = 13
+		self.P2 = 11
+		
+		self.setupGPIO()
+
+
+	def setupGPIO(self):
+		GPIO.setmode(GPIO.BOARD)
+		GPIO.setup(self.P1, GPIO.OUT)
+		GPIO.output(self.P1, GPIO.HIGH)
+		GPIO.setup(self.P2, GPIO.IN)
 		
 
 	def loadTensorModel(self):
+		print('Loading Map')
+		
 		self._MODEL_NAME = r'ssdlite_mobilenet_v2_coco_2018_05_09'
 		self._MODEL_FILE = self._MODEL_NAME + r'.tar.gz'
 		self._DOWNLOAD_BASE = r'http://download.tensorflow.org/models/object_detection/'
@@ -70,8 +86,8 @@ class Monitor():
 
 		self._NUM_CLASSES = 90
 
-		opener = urllib.request.URLopener()
-		opener.retrieve(self._DOWNLOAD_BASE + self._MODEL_FILE, self._MODEL_FILE)
+		#opener = urllib.request.URLopener()
+		#opener.retrieve(self._DOWNLOAD_BASE + self._MODEL_FILE, self._MODEL_FILE)
 		tar_file = tarfile.open(self._MODEL_FILE)
 
 		for file in tar_file.getmembers():
@@ -80,7 +96,10 @@ class Monitor():
 			if r'frozen_inference_graph.pb' in file_name:
 				tar_file.extract(file, os.getcwd())
 
+		print('Finished Loading Map')
+
 	def loadLabelMap(self):
+		print('Loading Map')
 		self.detection_graph = tf.Graph()
 
 		with self.detection_graph.as_default():
@@ -94,6 +113,8 @@ class Monitor():
 		self.label_map = label_map_util.load_labelmap(self._PATH_TO_LABELS)
 		self.categories = label_map_util.convert_label_map_to_categories(self.label_map, max_num_classes=self._NUM_CLASSES, use_display_name=True)
 		self.category_index = label_map_util.create_category_index(self.categories)
+
+		print('Finished Loading Map')
 
 	def getCords(self, box):
 		return (int(self.frame.shape[1]*box[1]), int(self.frame.shape[0]*box[0]), int(self.frame.shape[1]*box[3]), int(self.frame.shape[0]*box[2]))
@@ -128,6 +149,7 @@ class Monitor():
 						rects = []
 
 						if self.totalFrames % self.args['skip_frames'] == 0:
+							self.shutdownMonitor()
 							#Activates every n frames to run computationally expensive dnn.
 							status = 'Detecting'
 							trackers = []
@@ -280,13 +302,15 @@ class Monitor():
 		'''
 		Determine whether time to log.
 		'''
-		if datetime.datetime.now().hour > self.now.hour or forceLog: #If new hour started, run this
+		if datetime.datetime.now().hour != self.now.hour or forceLog: #If new hour started, run this
 
 			#Prepare filename
-			filename = r'logs\\' + f'{self.now.year:04d}{self.now.month:02d}{self.now.day:02d}{self.now.hour:02d}00.csv'
+			filename = f'{self.now.year:04d}{self.now.month:02d}{self.now.day:02d}{self.now.hour:02d}00.csv'
 
 			#Log files
+			print('saving')
 			self.saveLogs(filename)
+			print('saved')
 
 			#Reset all counters to begin anew
 			self.now = datetime.datetime.now()
@@ -294,6 +318,7 @@ class Monitor():
 			self.totalRight = 0
 			self.log = []
 			self.ct.nextObjectID = 0
+			print('done1')
 
 	def saveLogs(self, filename):
 		'''
@@ -301,14 +326,44 @@ class Monitor():
 		'''
 
 		#If no logs folder exists, make one.
-		if not os.path.isdir(os.path.join(os.path.dirname(__file__),r'logs')):
-			os.mkdir(os.path.join(os.path.dirname(__file__),r'logs'))
+		if not os.path.isdir(os.path.join(os.path.dirname(os.path.abspath(__file__)),r'logs')):
+			os.mkdir(os.path.join(os.path.dirname(os.path.abspath(__file__)),r'logs'))
+			
+		filename = os.path.join(os.path.dirname(os.path.abspath(__file__)),r'logs',filename)
+		
+		print(filename)
 
 		#Write all data, line by line, with index, time of crossing, and direction they went
-		with open(filename, 'w') as file:
+		with open(filename, 'a+') as file:
 			writer = csv.writer(file, delimiter=',')
 			for idx,date,direction,category in self.log:
 				writer.writerow([idx, date.strftime("%d/%m/%Y %H:%M:%S"), category, direction])
+
+	def shutdownMonitor(self):
+		if not GPIO.input(self.P2):
+			self.close()
+			try:
+				if self.MQTT_send():
+					os.system("sudo shutdown -h now")
+				else:
+					self.updateTime(forceLog = True)
+					print('done')
+					
+			except Exception as e:
+				print(e)
+			finally:
+				print('Shutting Down')
+				time.sleep(5)
+				os.system("sudo shutdown -h now")
+
+	def MQTT_send(self):
+		#Send Stuff
+
+		#If successful
+		return False
+
+		#If not sucessful
+		return True
 
 	def close(self):
 		self.vs.close()
@@ -340,7 +395,7 @@ if __name__ == '__main__':
 	cam = Monitor(**args).run()
 
 	#Close cam as last thing.
-	cam.close()
+	#cam.close()
 
 	'''
 	[1, 2, 3, 4, 6, 17, 18]
